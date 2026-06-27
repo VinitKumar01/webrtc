@@ -1,8 +1,23 @@
 "use client";
+
 import { useCallback, useEffect, useRef, useState } from "react";
+
+type Message =
+  | {
+      type: "sender" | "receiver";
+    }
+  | {
+      type: "createOffer" | "createAnswer";
+      sdp: RTCSessionDescriptionInit;
+    }
+  | {
+      type: "iceCandidate";
+      candidate: RTCIceCandidateInit;
+    };
 
 export default function ReceiverPage() {
   const [socket, setSocket] = useState<WebSocket | null>(null);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
 
@@ -20,51 +35,77 @@ export default function ReceiverPage() {
 
     return () => {
       pcRef.current?.close();
-      if (video) video.srcObject = null;
+
+      if (video) {
+        video.srcObject = null;
+      }
     };
   }, []);
 
   const startReceiving = useCallback(() => {
     if (!socket) {
-      console.warn("Socket is possibly null");
+      console.warn("Socket is not connected.");
       return;
     }
 
-    const pc = new RTCPeerConnection();
-    pcRef.current = pc;
+    if (pcRef.current) {
+      return;
+    }
 
-    pc.ontrack = (event) => {
+    const peerConnection = new RTCPeerConnection();
+    pcRef.current = peerConnection;
+
+    peerConnection.ontrack = (event) => {
       if (!videoRef.current) {
-        console.warn("Video element not found");
+        console.warn("Video element not found.");
         return;
       }
-      videoRef.current.srcObject = event.streams[0] as MediaStream;
+
+      if (event.streams[0] !== undefined) {
+        videoRef.current.srcObject = event.streams[0];
+      }
     };
 
-    pc.onicecandidate = (evt) => {
-      if (evt.candidate) {
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate && socket.readyState === WebSocket.OPEN) {
         socket.send(
-          JSON.stringify({ type: "iceCandidate", candidate: evt.candidate }),
+          JSON.stringify({
+            type: "iceCandidate",
+            candidate: event.candidate.toJSON(),
+          } satisfies Message),
         );
       }
     };
 
     socket.onmessage = async (event) => {
-      const message = JSON.parse(event.data);
+      try {
+        const message: Message = JSON.parse(event.data);
 
-      if (message.type === "createOffer") {
-        await pc.setRemoteDescription(message.sdp);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        switch (message.type) {
+          case "createOffer": {
+            await peerConnection.setRemoteDescription(message.sdp);
 
-        socket.send(
-          JSON.stringify({
-            type: "createAnswer",
-            sdp: answer,
-          }),
-        );
-      } else if (message.type === "iceCandidate") {
-        await pc.addIceCandidate(message.candidate);
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(
+                JSON.stringify({
+                  type: "createAnswer",
+                  sdp: peerConnection.localDescription!,
+                } satisfies Message),
+              );
+            }
+
+            break;
+          }
+
+          case "iceCandidate":
+            await peerConnection.addIceCandidate(message.candidate);
+            break;
+        }
+      } catch (err) {
+        console.error(err);
       }
     };
   }, [socket]);
@@ -73,14 +114,21 @@ export default function ReceiverPage() {
     if (!socket) return;
 
     socket.onopen = () => {
-      socket.send(JSON.stringify({ type: "receiver" }));
-      startReceiving();
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(
+          JSON.stringify({
+            type: "receiver",
+          } satisfies Message),
+        );
+
+        startReceiving();
+      }
     };
   }, [socket, startReceiving]);
 
   return (
-    <div className="h-full w-full flex flex-col justify-center items-center">
-      <video ref={videoRef} autoPlay playsInline></video>
+    <div className="flex h-full w-full items-center justify-center">
+      <video ref={videoRef} autoPlay playsInline className="max-w-full" />
     </div>
   );
 }

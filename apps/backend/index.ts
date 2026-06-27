@@ -26,39 +26,57 @@ wss.on("connection", (ws) => {
         receiverSocket = ws;
       } else if (msg.type === "createOffer") {
         if (ws !== senderSocket) {
-          console.warn("Sender can't create an offer");
+          console.warn("Only the sender can create an offer");
           return;
         }
-        receiverSocket?.send(
-          JSON.stringify({ type: "createOffer", sdp: msg.sdp } as message),
-        );
+        if (receiverSocket?.readyState === WebSocket.OPEN) {
+          receiverSocket?.send(
+            JSON.stringify({ type: "createOffer", sdp: msg.sdp } as message),
+          );
+        }
       } else if (msg.type === "createAnswer") {
         if (ws !== receiverSocket) {
-          console.warn("Receiver can't create an answer");
+          console.warn("Only the receiver can create an answer");
           return;
         }
-        senderSocket?.send(
-          JSON.stringify({ type: "createAnswer", sdp: msg.sdp } as message),
-        );
-      } else if ((msg.type = "iceCandidate")) {
-        if (ws === senderSocket) {
-          receiverSocket?.send(
-            JSON.stringify({
-              type: "iceCandidate",
-              candidate: msg.candidate,
-            } as message),
-          );
-        } else if (ws === receiverSocket) {
+        if (!msg.sdp) {
+          console.warn("Missing SDP!");
+          return;
+        }
+        if (senderSocket?.readyState === WebSocket.OPEN) {
           senderSocket?.send(
-            JSON.stringify({
-              type: "iceCandidate",
-              candidate: msg.candidate,
-            } as message),
+            JSON.stringify({ type: "createAnswer", sdp: msg.sdp } as message),
           );
+        }
+      } else if (msg.type === "iceCandidate") {
+        if (!msg.candidate) {
+          console.warn("Missing candidate!");
+          return;
+        }
+        if (ws === senderSocket) {
+          receiverSocket?.readyState === WebSocket.OPEN &&
+            receiverSocket?.send(
+              JSON.stringify({
+                type: "iceCandidate",
+                candidate: msg.candidate,
+              } as message),
+            );
+        } else if (ws === receiverSocket) {
+          senderSocket?.readyState === WebSocket.OPEN &&
+            senderSocket?.send(
+              JSON.stringify({
+                type: "iceCandidate",
+                candidate: msg.candidate,
+              } as message),
+            );
         }
       }
     } catch (err) {
       console.log("Invalid JSON", err);
     }
+    ws.on("close", () => {
+      if (ws === senderSocket) senderSocket = null;
+      if (ws === receiverSocket) receiverSocket = null;
+    });
   });
 });

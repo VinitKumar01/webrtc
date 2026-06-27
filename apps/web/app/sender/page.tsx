@@ -1,20 +1,30 @@
 "use client";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type message = {
-  type: "sender" | "receiver" | "createOffer" | "createAnswer" | "iceCandidate";
-  candidate?: string;
-  sdp?: string;
-};
+type Message =
+  | {
+      type: "sender" | "receiver";
+    }
+  | {
+      type: "createOffer" | "createAnswer";
+      sdp: RTCSessionDescriptionInit;
+    }
+  | {
+      type: "iceCandidate";
+      candidate: RTCIceCandidateInit;
+    };
 
 export default function SenderPage() {
   const [socket, setSocket] = useState<WebSocket | null>(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
-    const ws: WebSocket = new WebSocket("ws://localhost:8080");
+    const ws = new WebSocket("ws://localhost:8080");
     setSocket(ws);
 
     return () => {
@@ -28,7 +38,10 @@ export default function SenderPage() {
     return () => {
       pcRef.current?.close();
       streamRef.current?.getTracks().forEach((track) => track.stop());
-      if (video) video.srcObject = null;
+
+      if (video) {
+        video.srcObject = null;
+      }
     };
   }, []);
 
@@ -36,37 +49,52 @@ export default function SenderPage() {
     if (!socket) return;
 
     socket.onopen = () => {
-      socket.send(JSON.stringify({ type: "sender" } as message));
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(
+          JSON.stringify({
+            type: "sender",
+          } satisfies Message),
+        );
+      }
     };
   }, [socket]);
 
-  const getCameraStreamAndSend = useCallback((pc: RTCPeerConnection) => {
-    navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
-      streamRef.current = stream;
+  const getCameraStreamAndSend = useCallback(async (pc: RTCPeerConnection) => {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+    });
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
+    streamRef.current = stream;
 
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream);
-      });
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+    }
+
+    stream.getTracks().forEach((track) => {
+      pc.addTrack(track, stream);
     });
   }, []);
 
-  const initiateConnection = useCallback(() => {
+  const initiateConnection = useCallback(async () => {
     if (!socket) {
-      console.warn("Socket is possibly null");
+      console.warn("Socket is not connected.");
+      return;
+    }
+
+    if (pcRef.current) {
       return;
     }
 
     const peerConnection = new RTCPeerConnection();
     pcRef.current = peerConnection;
 
-    peerConnection.onicecandidate = (evt) => {
-      if (evt.candidate) {
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate && socket.readyState === WebSocket.OPEN) {
         socket.send(
-          JSON.stringify({ type: "iceCandidate", candidate: evt.candidate }),
+          JSON.stringify({
+            type: "iceCandidate",
+            candidate: event.candidate.toJSON(),
+          } satisfies Message),
         );
       }
     };
@@ -75,35 +103,49 @@ export default function SenderPage() {
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
 
-      socket.send(
-        JSON.stringify({
-          type: "createOffer",
-          sdp: peerConnection.localDescription,
-        }),
-      );
-    };
-
-    socket.onmessage = async (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-
-        if (msg.type === "createAnswer" && msg.sdp) {
-          await peerConnection.setRemoteDescription(msg.sdp);
-        } else if (msg.type === "iceCandidate" && msg.candidate) {
-          await peerConnection.addIceCandidate(msg.candidate);
-        }
-      } catch (err) {
-        console.warn("Response is not JSON", err);
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(
+          JSON.stringify({
+            type: "createOffer",
+            sdp: peerConnection.localDescription!,
+          } satisfies Message),
+        );
       }
     };
 
-    getCameraStreamAndSend(peerConnection);
+    socket.onmessage = async (event) => {
+      try {
+        const msg: Message = JSON.parse(event.data);
+
+        switch (msg.type) {
+          case "createAnswer":
+            await peerConnection.setRemoteDescription(msg.sdp);
+            break;
+
+          case "iceCandidate":
+            await peerConnection.addIceCandidate(msg.candidate);
+            break;
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+
+    try {
+      await getCameraStreamAndSend(peerConnection);
+      setIsConnecting(true);
+    } catch (err) {
+      console.error("Failed to access camera:", err);
+      peerConnection.close();
+      pcRef.current = null;
+    }
   }, [socket, getCameraStreamAndSend]);
 
   return (
-    <div className="h-full w-full flex flex-col justify-center items-center">
-      <button onClick={initiateConnection}>Send Data</button>
-      <video ref={videoRef} muted autoPlay playsInline></video>
+    <div className="flex h-full w-full flex-col items-center justify-center">
+      {!isConnecting && <button onClick={initiateConnection}>Send Data</button>}
+
+      <video ref={videoRef} autoPlay playsInline muted className="mt-4" />
     </div>
   );
 }
